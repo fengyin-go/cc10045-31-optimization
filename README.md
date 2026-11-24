@@ -79,5 +79,43 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 报告历史与核数（/report-history）
+
+数据报告除模板配置外，还有“实际生成过的输出”这一层：`report_outputs` 每生成一次就多一条，
+同一条输出可能先后补登多条来源凭据。前端入口是 `/report-history`，对应路由
+`backend/app/routers/report_history.py`，核心逻辑在 `services/report_history.py`、
+`services/report_provenance.py`、`services/report_snapshot.py`。
+
+- **检索**：`GET /api/report-history?business_period=&source=&metric=&as_of=`
+  按业务期间、指标取数来源、指标名检索真实输出，每条带该版指标数据。
+  来源支持规范名和历史旧简称（`report_sources.aliases`）；旧简称先做全等匹配，
+  只有无全等命中才退回包含匹配，避免“北区”把“北区门店”一起带出来。
+- **显示名存量**：正文里只有显示名的输出不删除。能解析到规范来源就展示规范名，
+  但状态仍是“有待翻查”（`display_only=true`，原文保留在 `display_name`）。
+- **凭据**：`POST /api/report-history/{output_id}/attributions` 追加登记，
+  可写 `registered_at` 复现历史时点。`status=已确认` 必须带 `evidence_ref`。
+  仅显示名的备注（`display_only=true`）不会把已确认来源降级。
+- **查验时点**：检索和下发都按 `as_of` / `verify_mode` 还原“那一刻”的来源状态：
+  - `filter_time`：固定开始筛选时点，之后补登的凭据不进入本次名单；
+  - `dispatch_time`：下发前重新核验，筛选后补登的凭据若已齐全则纳入，并标 `evidence_late`。
+- **无凭据不下发**：没有可验证凭据的输出只进“留待下次核数”清单
+  （`reconciliation_batch_deferrals`），不会出现在批次名单里。
+- **批次冻结**：下发时把名单、来源、凭据、该版指标数据写入
+  `reconciliation_batch_items`；之后补登或改确认状态不改写已发批次，
+  `GET /api/report-history/batches/{id}` 仍返回当次名单，并可通过 `attribution_trace`
+  逐条核对采用过哪条凭据。
+- **快照留档**：`POST /api/report-history/snapshots` 必须带 `output_id`
+  （结算员选中的那一条输出），不接受跨模板引用；快照固化输出编号、当时来源、
+  凭据和该版指标数据。同模板之后补跑新版本不会改写旧快照，
+  `GET /api/report-history/snapshots/{id}/verify` 完全从快照自身核对。
+- **待继续核对**：检索结果带 `already_dispatched` / `dispatched_batches` /
+  `needs_reconciliation`，用来区分已核过的版本和仍需继续核对的版本。
+
+种子场景（`backend/app/seed_report_history.py`，仅 reports 为空时写入）：
+报告 41 北区渠道（已确认）、报告 42 同期间旧模板只有简称“北区”（待翻查）、
+报告 43 北区门店（不同来源，不应并入渠道检索）。
+
+回归测试：`cd backend && .venv/bin/python tests/test_report_history.py`。
+
 领域：数据工程
 子方向：数据分析与数据应用

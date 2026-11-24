@@ -11,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import db
 from app.pipeline import seed_real_data
-from app.routers import ROUTERS, PIPELINE_ROUTER
+from app.routers import EXTRA_ROUTERS, PIPELINE_ROUTER, ROUTERS
+from app.seed_report_history import seed_report_history
 from app.store import store
 
 app = FastAPI(title="实时数据分析与可视化应用平台", version="1.0.0")
@@ -35,6 +36,8 @@ def startup_seed() -> None:
             print(f"[seed] 数据集初始化完成: {counts}")
         else:
             print(f"[seed] 数据集已存在，跳过初始化 (metrics={existing})")
+        report_counts = seed_report_history()
+        print(f"[seed] 报告历史场景: {report_counts}")
     except Exception as e:
         print(f"[seed] 初始化失败: {e}")
 
@@ -48,6 +51,10 @@ def health() -> dict[str, object]:
 def overview() -> dict[str, object]:
     return store.overview()
 
+
+# 报告历史/来源/核数/快照路由：静态前缀，需在 /api/{module} 之前注册
+for extra in EXTRA_ROUTERS:
+    app.include_router(extra.router)
 
 # 管道路由：数据分析核心入口
 app.include_router(PIPELINE_ROUTER)

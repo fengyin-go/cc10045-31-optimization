@@ -916,17 +916,34 @@ def generate_report(report: dict[str, Any]) -> dict[str, Any]:
 
     content_str = json.dumps(report_content, ensure_ascii=False, indent=2)
 
+    report_name = report_content["report_name"]
+    business_period = report.get("报告周期", report.get("report_period", "")) or ""
+    output_no = _next_output_no(report_id)
+    source_display_name = report.get("source_name") or report.get("来源") or ""
+
     output_id = db.insert("report_outputs", {
         "report_id": report_id,
         "output_content": content_str,
+        "output_no": output_no,
+        "business_period": business_period,
+        "source_display_name": source_display_name,
+        "generated_by": report.get("生成人", report.get("generated_by", "")) or "",
     })
 
     return {
         "id": output_id,
-        "report_name": report_content["report_name"],
+        "output_no": output_no,
+        "report_name": report_name,
+        "business_period": business_period,
         "format": output_format,
         "summary": report_content["summary"],
     }
+
+
+def _next_output_no(report_id: int) -> str:
+    """输出编号：模板号 + 该模板累计输出序号，如 R41-2。"""
+    used = db.count("report_outputs", "report_id=?", [report_id])
+    return f"R{report_id}-{used + 1}"
 
 
 # ============================================================================

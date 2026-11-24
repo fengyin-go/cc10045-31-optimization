@@ -245,6 +245,8 @@ DDL_STATEMENTS = [
         output_format TEXT NOT NULL DEFAULT 'json',
         auto_send INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT '草稿',
+        source_key TEXT,
+        source_name TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
 
@@ -253,8 +255,95 @@ DDL_STATEMENTS = [
         report_id INTEGER NOT NULL,
         output_content TEXT NOT NULL DEFAULT '{}',
         generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        output_no TEXT,
+        business_period TEXT,
+        source_display_name TEXT,
+        generated_by TEXT DEFAULT '',
         FOREIGN KEY (report_id) REFERENCES reports(id)
     )""",
+
+    # ==================== Report Provenance / Reconciliation Tier ====================
+    # 报告取数来源登记表：来源的规范键、显示名和历史旧简称都放在这里。
+    """CREATE TABLE IF NOT EXISTS report_sources (
+        source_key TEXT PRIMARY KEY,
+        source_name TEXT NOT NULL,
+        aliases TEXT NOT NULL DEFAULT '[]',
+        source_type TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '已确认',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+
+    # 来源凭据登记事件：同一条输出可以先后补登多条，按 registered_at 区分先后。
+    # 检索时按“查验时点”取该时点之前最近的一条，实现筛选口径可回溯。
+    """CREATE TABLE IF NOT EXISTS report_source_attributions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        output_id INTEGER NOT NULL,
+        source_key TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT '有待翻查',
+        evidence_ref TEXT,
+        evidence_detail TEXT,
+        display_only INTEGER NOT NULL DEFAULT 0,
+        registered_by TEXT DEFAULT '',
+        registered_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (output_id) REFERENCES report_outputs(id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rsa_output_time ON report_source_attributions(output_id, registered_at)",
+
+    # 核数批次：范围在下发时冻结，之后来源确认变动不改写已发批次。
+    """CREATE TABLE IF NOT EXISTS reconciliation_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_no TEXT NOT NULL UNIQUE,
+        business_period TEXT NOT NULL,
+        source_key TEXT,
+        source_name TEXT,
+        verify_mode TEXT NOT NULL DEFAULT 'filter_time',
+        filtered_at TEXT,
+        as_of TEXT NOT NULL,
+        metric_scope TEXT NOT NULL DEFAULT '[]',
+        dispatched_by TEXT DEFAULT '',
+        dispatched_at TEXT NOT NULL DEFAULT (datetime('now')),
+        item_count INTEGER NOT NULL DEFAULT 0,
+        note TEXT DEFAULT ''
+    )""",
+
+    """CREATE TABLE IF NOT EXISTS reconciliation_batch_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL,
+        output_id INTEGER NOT NULL,
+        output_no TEXT,
+        report_id INTEGER,
+        report_name TEXT,
+        business_period TEXT,
+        source_key TEXT,
+        source_name TEXT,
+        source_status TEXT,
+        evidence_ref TEXT,
+        evidence_registered_at TEXT,
+        evidence_late INTEGER NOT NULL DEFAULT 0,
+        disposition TEXT NOT NULL DEFAULT '本批下发',
+        metric_data TEXT NOT NULL DEFAULT '[]',
+        generated_at TEXT,
+        verify_mode TEXT,
+        selected_source_status TEXT,
+        selected_attribution_id INTEGER,
+        FOREIGN KEY (batch_id) REFERENCES reconciliation_batches(id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rbi_batch ON reconciliation_batch_items(batch_id)",
+
+    """CREATE TABLE IF NOT EXISTS reconciliation_batch_deferrals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL,
+        output_id INTEGER NOT NULL,
+        output_no TEXT,
+        source_name TEXT,
+        evidence_ref TEXT,
+        evidence_registered_at TEXT,
+        disposition TEXT NOT NULL DEFAULT '留待下次核数',
+        reason TEXT DEFAULT '',
+        FOREIGN KEY (batch_id) REFERENCES reconciliation_batches(id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rbd_batch ON reconciliation_batch_deferrals(batch_id)",
 
     # ==================== Operational Tier ====================
     """CREATE TABLE IF NOT EXISTS alerts (
@@ -318,6 +407,16 @@ DDL_STATEMENTS = [
         snapshot_content TEXT NOT NULL DEFAULT '{}',
         comparison_diff TEXT,
         status TEXT NOT NULL DEFAULT '已保存',
+        output_id INTEGER,
+        output_no TEXT,
+        business_period TEXT,
+        source_key TEXT,
+        source_name TEXT,
+        source_status TEXT,
+        evidence_ref TEXT,
+        source_as_of TEXT,
+        source_display_only INTEGER NOT NULL DEFAULT 0,
+        metric_data TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
 
@@ -356,6 +455,54 @@ DDL_STATEMENTS = [
 ]
 
 
+# 兼容旧库：在已有表上补加新增列（SQLite 的 CREATE TABLE IF NOT EXISTS 不会改旧表）。
+MIGRATION_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "report_outputs": [
+        ("output_no", "TEXT"),
+        ("business_period", "TEXT"),
+        ("source_display_name", "TEXT"),
+        ("generated_by", "TEXT DEFAULT ''"),
+    ],
+    "reports": [
+        ("source_key", "TEXT"),
+        ("source_name", "TEXT"),
+    ],
+    "snapshots": [
+        ("output_id", "INTEGER"),
+        ("output_no", "TEXT"),
+        ("business_period", "TEXT"),
+        ("source_key", "TEXT"),
+        ("source_name", "TEXT"),
+        ("source_status", "TEXT"),
+        ("evidence_ref", "TEXT"),
+        ("source_as_of", "TEXT"),
+        ("source_display_only", "INTEGER NOT NULL DEFAULT 0"),
+        ("metric_data", "TEXT NOT NULL DEFAULT '[]'"),
+    ],
+    "reconciliation_batch_items": [
+        ("selected_attribution_id", "INTEGER"),
+    ],
+    "reconciliation_batches": [
+        ("metric_scope", "TEXT NOT NULL DEFAULT '[]'"),
+    ],
+    "report_source_attributions": [
+        ("display_only", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+}
+
+
+def _migrate_added_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in MIGRATION_COLUMNS.items():
+        existing = {
+            row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not existing:
+            continue
+        for name, ddl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
 class AnalyticsDB:
     """SQLite-backed analytics database with connection pooling and WAL mode."""
 
@@ -373,6 +520,7 @@ class AnalyticsDB:
         conn.execute("PRAGMA busy_timeout=5000")
         for stmt in DDL_STATEMENTS:
             conn.execute(stmt)
+        _migrate_added_columns(conn)
         conn.commit()
         conn.close()
 

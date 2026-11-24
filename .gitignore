@@ -85,8 +85,11 @@ desktop.ini
 # ===== 运行期本地文件 =====
 *.sqlite3
 *.db
+*.db-shm
+*.db-wal
 *.pid
 *.seed
+data/
 
 # BEGIN S11 LOCAL SNAPSHOT EXCLUSIONS
 **/.git/**

@@ -13,6 +13,15 @@ from app.pipeline import generate_report
 from app.services.base import BaseModuleService
 
 
+def _maybe_json(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
 class DataReportService(BaseModuleService):
     MODULE = "data_report"
     ENTITY = "报告生成器"
@@ -30,21 +39,36 @@ class DataReportService(BaseModuleService):
             return {"ok": False, "message": f"报告 {report_id} 不存在"}
 
         result = generate_report(dict(report))
-        return {"ok": True, "report_name": result["report_name"], "summary": result["summary"]}
+        return {
+            "ok": True,
+            "output_id": result["id"],
+            "output_no": result.get("output_no"),
+            "report_name": result["report_name"],
+            "business_period": result.get("business_period"),
+            "summary": result["summary"],
+        }
 
     def recent_outputs(self, report_id: int, limit: int = 10) -> list[dict[str, Any]]:
-        """获取报告的历史生成结果。"""
+        """获取报告的历史生成结果，并带上按当前时点还原的来源状态。
+
+        同一模板补跑出来的新输出会出现在列表最前面，
+        但已生成的旧输出及其正文保持原样，历史检索仍能单独选中它们。
+        """
+        from app.services.report_history import report_history_service
+
         rows = db.fetchall(
-            "SELECT * FROM report_outputs WHERE report_id=? ORDER BY generated_at DESC LIMIT ?",
+            "SELECT * FROM report_outputs WHERE report_id=? "
+            "ORDER BY generated_at DESC, id DESC LIMIT ?",
             [report_id, limit],
         )
+        outputs: list[dict[str, Any]] = []
         for r in rows:
-            try:
-                r["output_content"] = json.loads(r["output_content"]) if isinstance(
-                    r["output_content"], str) else r["output_content"]
-            except json.JSONDecodeError:
-                pass
-        return rows
+            view = report_history_service.get_output(r["id"])
+            if view is None:
+                continue
+            view["output_content"] = _maybe_json(r.get("output_content"))
+            outputs.append(view)
+        return outputs
 
     def compare_outputs(self, output_id_a: int, output_id_b: int) -> dict[str, Any]:
         """对比两份报告输出的差异。"""
